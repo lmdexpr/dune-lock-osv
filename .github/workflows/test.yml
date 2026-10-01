@@ -1,3 +1,5 @@
+# This workflow is managed by gh actions-lock.
+
 name: Test
 
 on:
@@ -13,7 +15,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@v6.1.0
         with:
           persist-credentials: false
       - run: shellcheck sbom.sh
@@ -24,19 +26,19 @@ jobs:
         runner: [ ubuntu-latest, ubuntu-24.04-arm ]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@v6.1.0
         with:
           persist-credentials: false
 
       - name: Clean lock passes
         id: clean
-        uses: ./
+        uses: $/
         with:
           lockdir: test/clean.lock
 
       - name: Vulnerable lock is reported without failing
         id: vulnerable
-        uses: ./
+        uses: $/
         with:
           lockdir: test/vulnerable.lock
           fail-on-findings: 'false'

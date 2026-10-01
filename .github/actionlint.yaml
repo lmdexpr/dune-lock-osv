@@ -1,0 +1,5 @@
+paths:
+  .github/workflows/test.yml:
+    ignore:
+      # actionlint does not know the `$/` self-repository syntax of gh actions-lock yet
+      - 'specifying action "\$/" in invalid format'
