@@ -1,0 +1,138 @@
+name: dune-lock-osv
+description: Scan the packages pinned in a dune.lock directory against OSV.dev (opam ecosystem)
+author: lmdexpr
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  lockdir:
+    description: Path to the dune.lock directory
+    default: dune.lock
+  osv-scanner-version:
+    description: osv-scanner release tag to install
+    default: v2.5.1
+  fail-on-findings:
+    description: Fail the step when vulnerabilities are found (scanner errors always fail)
+    default: 'true'
+  create-issue:
+    description: 'Open (or update) a single issue when vulnerabilities are found. Requires `issues: write`'
+    default: 'false'
+  issue-title:
+    description: Title of the issue used by create-issue
+    default: 'security: known vulnerabilities in dune.lock (OSV.dev)'
+  issue-labels:
+    description: Comma-separated labels for the issue; missing labels are created
+    default: security,dependencies
+  github-token:
+    description: Token used by create-issue
+    default: ${{ github.token }}
+
+outputs:
+  exit-code:
+    description: 'osv-scanner exit code (0: clean, 1: vulnerabilities found, other: scanner error)'
+    value: ${{ steps.scan.outputs.exit }}
+  sbom:
+    description: Path to the generated CycloneDX SBOM
+    value: ${{ steps.sbom.outputs.path }}
+  report:
+    description: Path to the markdown report
+    value: ${{ steps.scan.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install osv-scanner
+      shell: sh
+      env:
+        OSV_SCANNER_VERSION: ${{ inputs.osv-scanner-version }}
+      run: |
+        set -eu
+        case "$(uname -m)" in
+          x86_64 | amd64) arch=amd64 ;;
+          aarch64 | arm64) arch=arm64 ;;
+          *) echo "::error::unsupported architecture: $(uname -m)"; exit 1 ;;
+        esac
+        dir="$RUNNER_TEMP/osv-scanner"
+        mkdir -p "$dir"
+        cd "$dir"
+        base="https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}"
+        curl -fsSL -o "osv-scanner_linux_${arch}" "${base}/osv-scanner_linux_${arch}"
+        curl -fsSL -o osv-scanner_SHA256SUMS "${base}/osv-scanner_SHA256SUMS"
+        sha256sum --check --ignore-missing osv-scanner_SHA256SUMS
+        install -m 0755 "osv-scanner_linux_${arch}" osv-scanner
+        echo "$dir" >> "$GITHUB_PATH"
+
+    - name: Generate SBOM from dune.lock
+      id: sbom
+      shell: sh
+      env:
+        LOCKDIR: ${{ inputs.lockdir }}
+      run: |
+        set -eu
+        path="$RUNNER_TEMP/dune-lock.cdx.json"
+        "$GITHUB_ACTION_PATH/sbom.sh" "$LOCKDIR" > "$path"
+        echo "path=$path" >> "$GITHUB_OUTPUT"
+
+    - name: Scan SBOM against OSV.dev
+      id: scan
+      shell: sh
+      env:
+        SBOM: ${{ steps.sbom.outputs.path }}
+      run: |
+        set +e
+        report="$RUNNER_TEMP/osv-report.md"
+        osv-scanner scan source -L "$SBOM" --format markdown --output-file "$report" --verbosity error
+        echo "exit=$?" >> "$GITHUB_OUTPUT"
+        echo "report=$report" >> "$GITHUB_OUTPUT"
+        [ -f "$report" ] && cat "$report" >> "$GITHUB_STEP_SUMMARY"
+        exit 0
+
+    - name: Open or update issue
+      if: inputs.create-issue == 'true' && steps.scan.outputs.exit == '1'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+      env:
+        REPORT: ${{ steps.scan.outputs.report }}
+        ISSUE_TITLE: ${{ inputs.issue-title }}
+        ISSUE_LABELS: ${{ inputs.issue-labels }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs');
+          const title = process.env.ISSUE_TITLE;
+          const labels = process.env.ISSUE_LABELS.split(',').map((s) => s.trim()).filter(Boolean);
+          const report = fs.readFileSync(process.env.REPORT, 'utf8');
+          const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+          const body = `${report}\n\nSource: https://osv.dev/list?ecosystem=opam (https://github.com/ocaml/security-advisories)\nRun: ${run}`;
+          const open = await github.paginate(github.rest.issues.listForRepo, {
+            ...context.repo, state: 'open', per_page: 100,
+          });
+          const existing = open.find((i) => !i.pull_request && i.title === title);
+          if (existing) {
+            if (existing.body !== body) {
+              await github.rest.issues.update({ ...context.repo, issue_number: existing.number, body });
+            }
+            return;
+          }
+          // Create missing labels first so that notification never depends on repository setup.
+          for (const name of labels) {
+            try {
+              await github.rest.issues.getLabel({ ...context.repo, name });
+            } catch (e) {
+              if (e.status !== 404) throw e;
+              await github.rest.issues.createLabel({ ...context.repo, name });
+            }
+          }
+          await github.rest.issues.create({ ...context.repo, title, body, labels });
+
+    - name: Fail on findings or scanner error
+      shell: sh
+      env:
+        EXIT: ${{ steps.scan.outputs.exit }}
+        FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+      run: |
+        case "$EXIT" in
+          0) exit 0 ;;
+          1) [ "$FAIL_ON_FINDINGS" = true ] && exit 1 || exit 0 ;;
+          *) echo "::error::osv-scanner exited with $EXIT"; exit "$EXIT" ;;
+        esac

@@ -1,0 +1,53 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: shellcheck sbom.sh
+
+  scan:
+    strategy:
+      matrix:
+        runner: [ ubuntu-latest, ubuntu-24.04-arm ]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Clean lock passes
+        id: clean
+        uses: ./
+        with:
+          lockdir: test/clean.lock
+
+      - name: Vulnerable lock is reported without failing
+        id: vulnerable
+        uses: ./
+        with:
+          lockdir: test/vulnerable.lock
+          fail-on-findings: 'false'
+
+      - name: Check outputs
+        env:
+          CLEAN: ${{ steps.clean.outputs.exit-code }}
+          VULNERABLE: ${{ steps.vulnerable.outputs.exit-code }}
+          REPORT: ${{ steps.vulnerable.outputs.report }}
+        run: |
+          set -eu
+          test "$CLEAN" = 0
+          test "$VULNERABLE" = 1
+          grep -q OSEC-2026-08 "$REPORT"
