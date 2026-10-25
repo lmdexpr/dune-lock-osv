@@ -91,14 +91,31 @@ runs:
         [ -f "$report" ] && cat "$report" >> "$GITHUB_STEP_SUMMARY"
         exit 0
 
-    - name: Open, update or close issue
-      # Scanner errors (exit >= 2) never touch the issue, so a broken run cannot close it.
+    - name: Decide issue action
+      id: issue
+      # Only the default branch owns the issue, so a PR scan neither overwrites nor closes it
+      # (and a fork PR's read-only token never reaches the Issues API).
+      # Schedules always run on the default branch.
       if: >-
-        inputs.create-issue == 'true' && (steps.scan.outputs.exit == '1'
-        || (steps.scan.outputs.exit == '0' && inputs.close-issue == 'true'))
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        inputs.create-issue == 'true' && (github.event_name == 'schedule'
+        || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+      shell: sh
       env:
         EXIT: ${{ steps.scan.outputs.exit }}
+        CLOSE_ISSUE: ${{ inputs.close-issue }}
+      run: |
+        # Scanner errors (exit >= 2) never touch the issue, so a broken run cannot close it.
+        case "$EXIT" in
+          1) action=open ;;
+          0) [ "$CLOSE_ISSUE" = true ] && action=close || action=none ;;
+          *) action=none ;;
+        esac
+        echo "action=$action" >> "$GITHUB_OUTPUT"
+
+    - name: Open or update issue
+      if: steps.issue.outputs.action == 'open'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+      env:
         REPORT: ${{ steps.scan.outputs.report }}
         ISSUE_TITLE: ${{ inputs.issue-title }}
         ISSUE_LABELS: ${{ inputs.issue-labels }}
@@ -107,26 +124,16 @@ runs:
         script: |
           const fs = require('fs');
           const title = process.env.ISSUE_TITLE;
+          const labels = process.env.ISSUE_LABELS.split(',').map((s) => s.trim()).filter(Boolean);
+          const report = fs.readFileSync(process.env.REPORT, 'utf8');
           const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+          // Also identifies the issue as ours; keep in sync with "Close issue".
+          const source = 'Source: https://osv.dev/list?ecosystem=opam (https://github.com/ocaml/security-advisories)';
+          const body = `${report}\n\n${source}\nRun: ${run}`;
           const open = await github.paginate(github.rest.issues.listForRepo, {
             ...context.repo, state: 'open', per_page: 100,
           });
-          const existing = open.find((i) => !i.pull_request && i.title === title);
-          if (process.env.EXIT === '0') {
-            if (existing) {
-              await github.rest.issues.createComment({
-                ...context.repo, issue_number: existing.number,
-                body: `No known vulnerabilities found anymore. Closing.\n\nRun: ${run}`,
-              });
-              await github.rest.issues.update({
-                ...context.repo, issue_number: existing.number, state: 'closed', state_reason: 'completed',
-              });
-            }
-            return;
-          }
-          const labels = process.env.ISSUE_LABELS.split(',').map((s) => s.trim()).filter(Boolean);
-          const report = fs.readFileSync(process.env.REPORT, 'utf8');
-          const body = `${report}\n\nSource: https://osv.dev/list?ecosystem=opam (https://github.com/ocaml/security-advisories)\nRun: ${run}`;
+          const existing = open.find((i) => !i.pull_request && i.title === title && i.body?.includes(source));
           if (existing) {
             if (existing.body !== body) {
               await github.rest.issues.update({ ...context.repo, issue_number: existing.number, body });
@@ -143,6 +150,32 @@ runs:
             }
           }
           await github.rest.issues.create({ ...context.repo, title, body, labels });
+
+    - name: Close issue
+      if: steps.issue.outputs.action == 'close'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+      env:
+        ISSUE_TITLE: ${{ inputs.issue-title }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const title = process.env.ISSUE_TITLE;
+          const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+          // Matching the source line written by "Open or update issue" leaves a hand-written issue with the same title alone.
+          const source = 'Source: https://osv.dev/list?ecosystem=opam (https://github.com/ocaml/security-advisories)';
+          const open = await github.paginate(github.rest.issues.listForRepo, {
+            ...context.repo, state: 'open', per_page: 100,
+          });
+          const existing = open.find((i) => !i.pull_request && i.title === title && i.body?.includes(source));
+          if (!existing) return;
+          // Close first: a failed close must not leave a closing comment on a still-open issue.
+          await github.rest.issues.update({
+            ...context.repo, issue_number: existing.number, state: 'closed', state_reason: 'completed',
+          });
+          await github.rest.issues.createComment({
+            ...context.repo, issue_number: existing.number,
+            body: `No known vulnerabilities found anymore.\n\nRun: ${run}`,
+          });
 
     - name: Fail on findings or scanner error
       shell: sh
