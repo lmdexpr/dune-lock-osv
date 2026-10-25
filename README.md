@@ -37,6 +37,7 @@ The markdown report is appended to the job summary. The SBOM and the report path
 | `osv-scanner-version` | `v2.5.1` | osv-scanner release tag (verified against the release's SHA256SUMS) |
 | `fail-on-findings` | `true` | Fail when vulnerabilities are found. Scanner errors always fail |
 | `create-issue` | `false` | Open a single issue (or update its body) when vulnerabilities are found |
+| `close-issue` | `true` | With `create-issue`, close that issue once a scan finds no vulnerabilities. Scanner errors never close it |
 | `issue-title` | `security: known vulnerabilities in dune.lock (OSV.dev)` | Title used to find and create the issue |
 | `issue-labels` | `security,dependencies` | Comma-separated labels; missing labels are created |
 | `github-token` | `${{ github.token }}` | Token used by `create-issue` |

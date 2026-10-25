@@ -18,6 +18,9 @@ inputs:
   create-issue:
     description: 'Open (or update) a single issue when vulnerabilities are found. Requires `issues: write`'
     default: 'false'
+  close-issue:
+    description: Close the issue opened by create-issue once a scan finds no vulnerabilities
+    default: 'true'
   issue-title:
     description: Title of the issue used by create-issue
     default: 'security: known vulnerabilities in dune.lock (OSV.dev)'
@@ -88,10 +91,14 @@ runs:
         [ -f "$report" ] && cat "$report" >> "$GITHUB_STEP_SUMMARY"
         exit 0
 
-    - name: Open or update issue
-      if: inputs.create-issue == 'true' && steps.scan.outputs.exit == '1'
+    - name: Open, update or close issue
+      # Scanner errors (exit >= 2) never touch the issue, so a broken run cannot close it.
+      if: >-
+        inputs.create-issue == 'true' && (steps.scan.outputs.exit == '1'
+        || (steps.scan.outputs.exit == '0' && inputs.close-issue == 'true'))
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
       env:
+        EXIT: ${{ steps.scan.outputs.exit }}
         REPORT: ${{ steps.scan.outputs.report }}
         ISSUE_TITLE: ${{ inputs.issue-title }}
         ISSUE_LABELS: ${{ inputs.issue-labels }}
@@ -100,14 +107,26 @@ runs:
         script: |
           const fs = require('fs');
           const title = process.env.ISSUE_TITLE;
-          const labels = process.env.ISSUE_LABELS.split(',').map((s) => s.trim()).filter(Boolean);
-          const report = fs.readFileSync(process.env.REPORT, 'utf8');
           const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-          const body = `${report}\n\nSource: https://osv.dev/list?ecosystem=opam (https://github.com/ocaml/security-advisories)\nRun: ${run}`;
           const open = await github.paginate(github.rest.issues.listForRepo, {
             ...context.repo, state: 'open', per_page: 100,
           });
           const existing = open.find((i) => !i.pull_request && i.title === title);
+          if (process.env.EXIT === '0') {
+            if (existing) {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: existing.number,
+                body: `No known vulnerabilities found anymore. Closing.\n\nRun: ${run}`,
+              });
+              await github.rest.issues.update({
+                ...context.repo, issue_number: existing.number, state: 'closed', state_reason: 'completed',
+              });
+            }
+            return;
+          }
+          const labels = process.env.ISSUE_LABELS.split(',').map((s) => s.trim()).filter(Boolean);
+          const report = fs.readFileSync(process.env.REPORT, 'utf8');
+          const body = `${report}\n\nSource: https://osv.dev/list?ecosystem=opam (https://github.com/ocaml/security-advisories)\nRun: ${run}`;
           if (existing) {
             if (existing.body !== body) {
               await github.rest.issues.update({ ...context.repo, issue_number: existing.number, body });
